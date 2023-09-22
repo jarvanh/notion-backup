@@ -1,0 +1,87 @@
+# This is a basic workflow to help you get started with Actions
+
+name: notion-backup-remove-files-id
+
+# Controls when the action will run.
+# on:
+#   # Triggers the workflow on push or pull request events but only for the main branch
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
+on:
+  schedule:
+    - cron: "0 6,13,18,23 * * *"
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4.5.0
+        with:
+          python-version: "3.10"
+      - name: install dependency
+        run: pip3 install requests
+      - name: run notion_backup.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }} # 在后台配置好token,或者用NOTION_EMAIL和NOTION_PASSWORD也可以
+        run: |
+          echo '开始执行'
+          pwd
+          echo '执行前 ls'
+          ls
+          python notion_backup_remove_files_id.py
+          echo '执行后 ls'
+          ls
+          echo '进入 backup 文件夹'
+          cd backup
+          pwd
+          echo 'backup 文件'
+          ls
+          echo 'backup 大小'
+          du -sh
+          echo '执行完成'
+      - name: rclone-install
+        run: |
+          # 安装 rclone
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo mv rclone /usr/bin
+          sudo chmod +x /usr/bin/rclone
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          # 写配置文件
+          mkdir -p ~/.config/rclone/
+          cat << EOF > ~/.config/rclone/rclone.conf
+          $RCLONE_CONFIG
+          EOF
+      - name: rclone-run
+        run: |
+          # Rclone-Run
+          # 更改时区
+          sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  
+          echo "==========开始同步==========="
+          rclone sync --ignore-errors /home/runner/work/notion-backup/notion-backup/backup i:backup/notion-backup-remove-files-id -vv
+          rclone size --ignore-errors i:backup/notion-backup-remove-files-id -vv
+          echo "==========结束同步==========="
+      # - name: push backup
+      #   run: |
+      #     git config --global user.name "github-actions"
+      #     git config --global user.email "github-actions@github.com"
+      #     git add .
+      #     git commit -m "backup" || true
+      #     git push origin main
+      - name: send notification
+        run: |
+          curl -s -X POST https://api.telegram.org/bot'${{ secrets.TELEGRAM_BOT_TOKEN }}'/sendMessage -d chat_id='${{ secrets.TELEGRAM_CHAT_ID }}' -d text="github notion-backup-remove-files-id 任务执行结束"

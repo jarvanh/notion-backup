@@ -1,0 +1,603 @@
+import os
+import re
+import time
+import json
+import shutil
+import zipfile
+import requests
+import argparse
+import subprocess
+import urllib.parse
+
+from notify import send
+
+# ={'spaces':[]} 则备份所有空间 'space_blocks':[] 则备份整个空间
+# block id格式切记为-隔开!!!
+# 1.备份所有空间
+# {'spaces': []}
+# 2.备份指定空间所有block
+# {'spaces': [
+#         {'space_name': 'space_name', 'space_blocks': []}
+#     ]
+# }
+# 2.1两种方式都可以
+# {'spaces': [
+#         {'space_name': 'space_name'}
+#     ]
+# }
+# 3.备份指定空间指定block及block的子页面
+# {'spaces': [
+#         {'space_name': 'space_name', 'space_blocks': [
+#                 {'block_id': '12345678-1234-1234-1234-123456789123', 'block_name': 'Home'}
+#             ]
+#         }
+#     ]
+# }
+# 4.也可以修改config.json
+# config.json为上面备份配置的json格式数据,注意里面符号为#双引号#
+
+DEFAULT_BACKUP_CONFIG = {'spaces':[]}
+# {
+#     'spaces': [
+#         {'space_name': 'D', 'space_blocks': [
+#                 {'block_id': '13cbc90a-d6cf-4f49-a4f1-891d9c3f0c88', 'block_name': '123'}
+#             ]
+#         }
+#     ]
+# }
+
+# {
+    # 'spaces': [{
+    #     'space_name': 'space_name',
+    #     'space_blocks': [{
+    #         'block_id': '12345678-1234-1234-1234-123456789123',
+    #         'block_name': 'Home1'
+    #     }, {
+    #         'block_id': '12345678-1234-1234-1234-123456789123',
+    #         'block_name': 'Home2'
+    #     }]
+    # }]
+# }
+
+# 文件末尾那一串id是唯一标识，如果子页面同名的话，文档内引用地址就会出问题了
+# 比如导出html时，如果去掉id，那页面内引用多个同名./xxxxx.html就有问题了
+# 不过去掉就整齐好多
+
+# 支持去除所有文件和文件夹的id，并重新生成压缩包
+# 修改全局变量REMOVE_FILES_ID即可
+# 是否去除所有文件和文件夹的id
+# REMOVE_FILES_ID = False
+REMOVE_FILES_ID = True
+
+# 默认配置无需更改
+NOTION_TIMEZONE = os.getenv('NOTION_TIMEZONE', 'Asia/Shanghai')
+NOTION_LOCALE = os.getenv('NOTION_TIMEZONE', 'en')
+NOTION_API = os.getenv('NOTION_API', 'https://www.notion.so/api/v3')
+# 邮箱和用户名
+NOTION_EMAIL = os.getenv('NOTION_EMAIL', '')
+NOTION_PASSWORD = os.getenv('NOTION_PASSWORD', '')
+# 修改为浏览器内获取到的token
+NOTION_TOKEN = os.getenv('NOTION_TOKEN', 'YOUR TOKEN')
+# 登录后获取 下载文件需要
+NOTION_FILE_TOKEN = ''
+NOTION_EXPORT_TYPE = os.getenv('NOTION_EXPORT_TYPE', 'markdown')  # html pdf
+# 备份文件保存目录
+SAVE_DIR = 'backup/'
+# git相关信息
+# REPOSITORY_URL = os.getenv('REPOSITORY_URL', '')
+# REPOSITORY_BRANCH = 'main'
+# GIT_USERNAME = 'github-actions'
+# GIT_EMAIL = 'github-actions@github.com'
+
+
+def run_command(cmd):
+    try:
+        proc = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+        # flag,stdout,stderr
+        if proc.stderr != '':
+            print('cmd:{} stdout:{} stderr:{}'.format(cmd, proc.stdout, proc.stderr))
+        return proc.stderr == '', proc.stdout, proc.stderr
+    except Exception as e:
+        return False, '', str(e)
+
+
+def writeLog(s):
+    with open('log.txt', 'a') as log:
+        msg = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()) + ' ' + s
+        print(msg)
+        send('notion备份', msg)
+        log.write(msg + '\n')
+        
+
+def unzip(filename: str, saveDir: str = ''):
+    try:
+        file = zipfile.ZipFile(filename)
+        dirname = filename.replace('.zip', '')
+        if saveDir != '':
+            dirname = saveDir
+        # 如果存在与压缩包同名文件夹 提示信息并跳过
+        if os.path.exists(dirname):
+            print(f'{dirname} 已存在,将被覆盖')
+            shutil.rmtree(dirname)
+        # 创建文件夹,并解压
+        os.mkdir(dirname)
+        file.extractall(dirname)
+        file.close()
+        return dirname
+    except Exception as e:
+        print(f'{filename} unzip fail,{str(e)}')
+
+
+# def unzip(filename: str, saveDir: str = ''):   
+#     file = zipfile.ZipFile(filename)
+#     dirname = filename.replace('.zip', '')
+#     if saveDir != '':
+#         dirname = saveDir
+#     # 如果存在与压缩包同名文件夹 提示信息并跳过
+#     if os.path.exists(dirname):
+#         print(f'{dirname} 已存在，将被覆盖')
+#         shutil.rmtree(dirname)
+#     # 创建文件夹，并解压
+#     os.mkdir(dirname)
+#     print(f'dirname:{dirname}')
+#     # 统计原始压缩文件的数量
+#     original_files_count = 0
+#     # 统计解压缩文件的数量
+#     extracted_files = []
+#     for zip_info in file.infolist():
+#         original_files_count += 1
+#         extracted_files.append(zip_info.filename)
+
+#         original_filename = zip_info.filename
+#         decoded_filename = urllib.parse.unquote(original_filename)
+
+#         # 判断解压路径是否存在同名文件
+#         target_file = re.sub(r'-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', '', decoded_filename)
+#         target_path = os.path.join(dirname, target_file) 
+#         # 如果不存在才去除UUID
+#         if os.path.exists(target_path):
+#             print(f'同名UUID文件已存在: {target_path}')
+#         else:
+#             # 去除UUID
+#             decoded_filename = re.sub(r'-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', '', decoded_filename)
+#             # print(f'decoded_filename去除UUID: {decoded_filename}')
+
+#         # 判断解压路径是否存在同名文件
+#         target_file = re.sub(r'\s\w{32}', '', decoded_filename)
+#         target_path = os.path.join(dirname, target_file) 
+#         # 如果不存在才去除32位ID
+#         if os.path.exists(target_path):
+#             print(f'同名32位ID文件已存在: {target_path}')
+#         else:
+#             # 去除32位ID
+#             decoded_filename = re.sub(r'\s\w{32}', '', decoded_filename)
+#             # print(f'decoded_filename去除32位ID: {decoded_filename}')
+        
+#         zip_info.filename = decoded_filename
+
+#         # 检查文件名长度是否过长
+#         # if len(decoded_filename) > 150:
+#         #     # 缩短文件名的长度（不包含拓展名）
+#         #     print(f'缩短文件名的长度（不包含拓展名）: {decoded_filename}')
+#         #     filename, extension = os.path.splitext(decoded_filename)
+#         #     shortened_filename = filename[:120 - len(extension)] + extension
+#         #     print(f'Shortened filename: {shortened_filename}')
+#         #     zip_info.filename = shortened_filename
+
+#         try:
+#             file.extract(zip_info,dirname)
+#         except Exception as e:
+#             print(f'filename:{filename} 解压失败,错误信息:{str(e)}')
+#     file.close()
+
+#     # 统计解压后的文件数量
+#     extracted_files_count = 0
+
+#     for root, dirs, files in os.walk('.'):
+#         for file in files:
+#             extracted_files_count += 1
+#     # 打印统计结果
+#     print('--- Original Files ---')
+#     print(f'Count: {original_files_count}')
+#     print('--- Extracted Files ---')
+#     print(f'Count: {extracted_files_count}')
+
+#     return dirname
+    
+
+def zip_dir(dirpath, outFullName):
+    """
+        压缩指定文件夹
+        :param dirpath: 目标文件夹路径
+        :param outFullName: 压缩文件保存路径+xxxx.zip
+        :return: 无
+    """
+    zip = zipfile.ZipFile(outFullName, "w", zipfile.ZIP_DEFLATED)
+    for path, dirnames, filenames in os.walk(dirpath):
+        # 去掉目标跟路径，只对目标文件夹下边的文件及文件夹进行压缩
+        fpath = path.replace(dirpath, '')
+        for filename in filenames:
+            zip.write(os.path.join(path, filename), os.path.join(fpath, filename))
+    zip.close()
+
+
+def initNotionToken():
+    global NOTION_TOKEN
+    if not NOTION_EMAIL and not NOTION_PASSWORD:
+        print('使用已设置的token:{}'.format(NOTION_TOKEN))
+        return NOTION_TOKEN
+    loginData = {'email': NOTION_EMAIL, 'password': NOTION_PASSWORD}
+    headers = {
+        # Notion obviously check this as some kind of (bad) test of CSRF
+        'host': 'www.notion.so'
+    }
+    response = requests.post(NOTION_API + '/loginWithEmail', json=loginData, headers=headers)
+    response.raise_for_status()
+
+    NOTION_TOKEN = response.cookies['token_v2']
+    print('使用账户获取到的token:{}'.format(NOTION_TOKEN))
+    return response.cookies['token_v2']
+
+
+def exportSpace(spaceId):
+    return {
+        'task': {
+            'eventName': 'exportSpace',
+            'request': {
+                'spaceId': spaceId,
+                'exportOptions': {
+                    'exportType': NOTION_EXPORT_TYPE,
+                    'timeZone': NOTION_TIMEZONE,
+                    'locale': NOTION_LOCALE,
+                    'flattenExportFiletree': False
+                }
+            }
+        }
+    }
+
+
+# {
+#     "task": {
+#         "eventName": "exportBlock",
+#         "request": {
+#             "block": {
+#                 "id": "c093243a-a553-45ae-954f-4bf80d995167",
+#                 "spaceId": "38d3bbb5-37de-4891-86cc-9dcfbafc30d0"
+#             },
+#             "recursive": true,
+#             "exportOptions": {
+#                 "exportType": "markdown",
+#                 "timeZone": "Asia/Shanghai",
+#                 "locale": "en",
+#                 "flattenExportFiletree": false
+#             }
+#         }
+#     }
+# }
+
+
+def exportSpaceBlock(spaceId, blockId):
+    return {
+        'task': {
+            'eventName': 'exportBlock',
+            'request': {
+                'block': {
+                    'id': blockId,
+                    'spaceId': spaceId
+                },
+                'recursive': True,
+                'exportOptions': {
+                    'exportType': NOTION_EXPORT_TYPE,
+                    'timeZone': NOTION_TIMEZONE,
+                    'locale': NOTION_LOCALE,
+                    'flattenExportFiletree': False
+                }
+            }
+        }
+    }
+
+
+def request_post(endpoint: str, params: object):
+    global NOTION_FILE_TOKEN
+    #print('reqeust:{} {}'.format(endpoint, params))
+    try:
+        response = requests.post(
+            f'{NOTION_API}/{endpoint}',
+            data=json.dumps(params).encode('utf8'),
+            headers={
+                'content-type': 'application/json',
+                'cookie': f'token_v2={NOTION_TOKEN};'
+            },
+        )
+        if response:
+            if not NOTION_FILE_TOKEN and response.cookies['file_token']:              
+                NOTION_FILE_TOKEN = response.cookies['file_token']
+            return response.json()
+        else:
+            print('request url:{} error response:{}'.format(endpoint, response))
+    except Exception as e:
+        print('request url:{} error {}'.format(endpoint, e))
+
+def getUserContent():
+    return request_post('loadUserContent', {})['recordMap']
+
+
+def exportUrl(taskId):
+    url = False
+    print('Polling for export task: {}'.format(taskId))
+    while True:
+        res = request_post('getTasks', {'taskIds': [taskId]})
+        tasks = res.get('results')
+        task = next(t for t in tasks if t['id'] == taskId)
+        if task['state'] == 'success':
+            url = task['status']['exportURL']
+            # print("download url:" + url)
+            break
+        elif task['state'] == 'failure':
+            print(task['error'])
+        else:
+            print('{}.'.format(task['state']), end='', flush=True)
+            time.sleep(10)
+    return url
+
+
+def remove_files_id():
+    if not REMOVE_FILES_ID:
+        return
+    # 去除emoji
+    # emoji_pattern = re.compile(pattern = "["
+    #                                     u"\U0001F600-\U0001F64F"  # emoticons
+    #                                     u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+    #                                     u"\U0001F680-\U0001F6FF"  # transport & map symbols
+    #                                     u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+    #                                 "]+", flags = re.UNICODE)
+    # writeLog('开始执行remove_emoji')
+    # for root, dirs, files in os.walk(SAVE_DIR):
+    #     for file in files:
+    #         path = os.path.join(root, file)
+    #         new_name = emoji_pattern.sub(r'', file)
+    #         if file != new_name:
+    #             try:
+    #                 os.rename(path, os.path.join(root, new_name))
+    #                 writeLog('remove_emoji   '+new_name)
+    #                 print(f"文件去除emoji成功: {path} -> {os.path.join(root, new_name)}")
+    #             except OSError as e:
+    #                 print(f"文件去除emoji失败: {path} -> {os.path.join(root, new_name)}，错误信息: {str(e)}")
+    writeLog('开始执行remove_files_id')
+    for root, dirs, files in os.walk(SAVE_DIR):
+        for file in files:
+            path = os.path.join(root, file)
+            filename_id = re.compile(r'[a-fA-F\d]{32}').findall(file)
+            if filename_id:
+                new_filename = file.replace(' ' + filename_id[0], '')
+                new_path = os.path.join(root, new_filename)
+                try:
+                    os.rename(path, new_path)
+                    writeLog('new_filename   '+new_filename)
+                    print(f"文件去除id成功: {path} -> {new_path}")
+                except OSError as e:
+                    print(f"文件去除id失败: {path} -> {new_path}，错误信息: {str(e)}")
+    while True:
+        rename_dir_flag = False
+        writeLog('开始执行rename_dir_uuid_flag')
+        for root, dirs, files in os.walk(SAVE_DIR):
+            for dir in dirs:
+                path = os.path.join(root, dir)
+                dir_uuid = re.compile(r'[a-fA-F\d]{8}-[a-fA-F\d]{4}-[a-fA-F\d]{4}-[a-fA-F\d]{4}-[a-fA-F\d]{12}').findall(dir)
+                if dir_uuid:
+                    try:
+                        new_dirname = dir.replace('-' + dir_uuid[0], '')
+                        new_path = os.path.join(root, new_dirname)
+                        os.rename(path, new_path)
+                        writeLog('new_dirname_dir_uuid   '+new_dirname)
+                        print(f"文件夹去除uuid成功: {path} -> {new_path}")
+                        rename_dir_flag = True
+                        break   
+                    except OSError as e:
+                        print(f"文件夹去除uuid失败: {path} -> {new_path}，错误信息: {str(e)}")        
+        writeLog('开始执行rename_dir_id_flag')
+        for root, dirs, files in os.walk(SAVE_DIR):
+            for dir in dirs:
+                path = os.path.join(root, dir)
+                dir_id = re.compile(r'[a-fA-F\d]{32}').findall(dir)
+                if dir_id:
+                    try:
+                        new_dirname = dir.replace(' ' + dir_id[0], '')
+                        new_path = os.path.join(root, new_dirname)
+                        os.rename(path, new_path)
+                        writeLog('new_dirname_dir_id   '+new_dirname)
+                        print(f"文件夹去除id成功: {path} -> {new_path}")
+                        rename_dir_flag = True
+                        break
+                    except OSError as e:
+                        print(f"文件夹去除id失败: {path} -> {new_path}，错误信息: {str(e)}") 
+        # 去除emoji
+        # writeLog('开始执行remove_emoji_dir')
+        # for root, dirs, files in os.walk(SAVE_DIR):
+        #     for dir in dirs:
+        #         path = os.path.join(root, dir)
+        #         new_name = emoji_pattern.sub(r'', dir) 
+        #         if dir != new_name:
+        #             try:
+        #                 os.rename(path, os.path.join(root, new_name))
+        #                 writeLog('remove_emoji_dir   '+new_dirname)
+        #                 print(f"文件夹去除emoji成功: {path} -> {os.path.join(root, new_name)}")
+        #                 rename_dir_flag = True
+        #                 break   
+        #             except OSError as e:
+        #                 print(f"文件夹去除emoji失败: {path} -> {os.path.join(root, new_name)}，错误信息: {str(e)}")
+        if not rename_dir_flag:
+            writeLog('结束执行rename_dir_flag')
+            break
+
+
+def downloadAndUnzip(url, filename):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    savePath = SAVE_DIR + filename
+    with requests.get(url, stream=True, headers={'cookie': f'file_token={NOTION_FILE_TOKEN}'}) as r:
+        with open(savePath, 'wb') as f:
+            shutil.copyfileobj(r.raw, f)
+            
+    # 获取文件大小
+    file_size = os.path.getsize(savePath)
+    # 以字节为单位显示文件大小
+    print(f"File size in bytes: {file_size}")
+    # 转换为MB
+    file_size_mb = file_size / (1024*1024)
+    print(f"File size in MB: {file_size_mb:.2f}")  
+    # 转换为GB
+    file_size_gb = file_size / (1024*1024*1024) 
+    print(f"File size in GB: {file_size_gb:.2f}")
+    
+    unzip(savePath)
+    
+    if os.path.exists(savePath):
+        print('保存文件:' + savePath)
+    else:
+        print('保存文件:' + savePath + '失败')
+        
+    save_dir = savePath.replace(".zip", "")
+    for file in os.listdir(save_dir):
+        file_path = os.path.join(save_dir, file)
+        if '.zip' in file_path:
+            print('解压子压缩文件:' + file_path)
+            unzip(file_path)
+            os.remove(file_path)
+    if REMOVE_FILES_ID:
+        remove_files_id()
+        os.remove(savePath)
+        zip_dir(save_dir, savePath)
+
+
+# def initGit():
+#     run_command(f'git config --global http.version HTTP/1.1')
+#     run_command(f'git config --global http.postBuffer 524288000')
+#     run_command(f'git config --global user.name {GIT_USERNAME}')
+#     run_command(f'git config --global user.email {GIT_EMAIL}')
+#     run_command(f'git config pull.ff false')
+#     run_command(f'git init')
+#     run_command(f'git remote add origin {REPOSITORY_URL}')
+#     run_command(f'git branch -M {REPOSITORY_BRANCH}')
+#     run_command(f'git fetch --all && git reset --hard origin/{REPOSITORY_BRANCH}')
+#     run_command(f'git pull origin {REPOSITORY_BRANCH}')
+
+
+# def pull():
+#     run_command(f'git pull origin {REPOSITORY_BRANCH}')
+
+
+# def push():
+#     run_command(f'git add . && git commit -m "backup" && git push origin {REPOSITORY_BRANCH}')
+
+
+def main():
+    # 初始化git仓库
+    # initGit()
+
+    # 初始化Token
+    initNotionToken()
+
+    # 获取用户信息
+    userContent = getUserContent()
+    time.sleep(3)
+
+    #userId = list(userContent['notion_user'].keys())[0]
+    #print(f'User id: {userId}')
+
+    spaces = [(space_id, space_details['value']['name']) for (space_id, space_details) in userContent['space'].items()]
+    backup_space_names = []
+    backup_space_config = {}
+    for backup_config_item in DEFAULT_BACKUP_CONFIG['spaces']:
+        if backup_config_item['space_name']:
+            backup_space_names.append(backup_config_item['space_name'])
+            backup_space_config[backup_config_item['space_name']] = backup_config_item
+    print(f'Available spaces total:{len(spaces)}')
+    for (spaceId, spaceName) in spaces:
+        print(f'\t-  {spaceId}:{spaceName}')
+        taskId = ''
+
+        # 备份所有空间
+        if len(backup_space_names) == 0:
+            taskId = request_post('enqueueTask', exportSpace(spaceId)).get('taskId')
+            url = exportUrl(taskId)
+            downloadAndUnzip(url, f'{spaceName}.zip')
+        elif spaceName in backup_space_names:
+            # 指定了space下的block
+            if 'space_blocks' in backup_space_config[spaceName] and backup_space_config[spaceName]['space_blocks']:
+                for space_block in backup_space_config[spaceName]['space_blocks']:
+                    block_id = space_block['block_id']
+                    block_name = space_block['block_name']
+                    taskId = request_post('enqueueTask', exportSpaceBlock(spaceId, block_id)).get('taskId')
+                    url = exportUrl(taskId)
+                    downloadAndUnzip(url, f'{spaceName}-{block_name}.zip')
+            else:
+                # 没指定space block则备份整个空间
+                taskId = request_post('enqueueTask', exportSpace(spaceId)).get('taskId')
+                url = exportUrl(taskId)
+                downloadAndUnzip(url, f'{spaceName}.zip')
+        else:
+            print('space:{}跳过 不在备份列表'.format(spaceName))
+
+    # git
+    # print('开始提交代码')
+    # pull()
+    # push()
+    # writeLog('notion备份到github完成')
+
+
+def run_retry():
+    count = 0
+    while True:
+        try:
+            main()
+            break
+        except Exception as e:
+            count += 1
+            writeLog('notion备份执行出错:' + str(e))
+            print('执行出错:', str(e))
+        if count > 3:
+            writeLog('notion备份尝试{}次出错'.format(count))
+            print('尝试{}次出错'.format(count))
+            break
+        time.sleep(15)
+
+
+if __name__ == '__main__':
+    writeLog('开始执行notion备份')
+    parser = argparse.ArgumentParser(description='ArgUtils')
+    parser.add_argument('-c',
+                        type=str,
+                        default='',
+                        required=False,
+                        help='配置文件路径,内容格式为 {"spaces": [{"space_name": "xxx", "space_blocks": [{"block_id": "12345678-1234-1234-1234-123456789123", "block_name": "xx"}]}]}')
+
+    args = parser.parse_args()
+    if args.c:
+        try:
+            with open(args.c, 'r') as f:
+                c = f.read()
+                print('读取文件:{}内容为:\n{}'.format(args.c, c))
+                DEFAULT_BACKUP_CONFIG = json.loads(c)
+                print('使用参数 DEFAULT_BACKUP_CONFIG:{}'.format(DEFAULT_BACKUP_CONFIG))
+        except Exception as e:
+            print('参数格式错误,请检查是否为合法的json字符串')
+            print('{"spaces": [{"space_name": "xxx", "space_blocks": [{"block_id": "12345678-1234-1234-1234-123456789123", "block_name": "xx"}]}]}')
+            raise Exception('参数格式错误,请检查是否为合法的json字符串:' + str(e))
+    else:
+        print('使用默认配置 DEFAULT_BACKUP_CONFIG:{}'.format(DEFAULT_BACKUP_CONFIG))
+
+    run_retry()
+
+# 定时定点执行
+# nohup python3 notion-backup.py -u 2>&1 >> /tmp/notion-backup.log
+# if __name__ == '__main__':
+#     print('开始执行')
+#     running = False
+#     while True and not running:
+#         now = datetime.datetime.now()
+#         if now.hour == 3 and now.minute == 0:
+#             running = True
+#             run_retry()
+#             running = False
+
+#         time.sleep(30)
