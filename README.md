@@ -1,3 +1,4 @@
+1
 # notion-backup
 
 ## notion 自动备份脚本
