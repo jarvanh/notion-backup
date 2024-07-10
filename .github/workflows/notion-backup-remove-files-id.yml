@@ -72,8 +72,8 @@ jobs:
           # 更改时区
           sudo cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime  
           echo "==========开始同步==========="
-          rclone sync --ignore-errors /home/runner/work/notion-backup/notion-backup/backup i:backup/notion-backup-remove-files-id -vv
-          rclone size --ignore-errors i:backup/notion-backup-remove-files-id -vv
+          rclone sync --ignore-errors /home/runner/work/notion-backup/notion-backup/backup onedrive:backup/notion-backup-remove-files-id -vv
+          rclone size --ignore-errors onedrive:backup/notion-backup-remove-files-id -vv
           echo "==========结束同步==========="
       # - name: push backup
       #   run: |
